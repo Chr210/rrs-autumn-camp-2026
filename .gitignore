@@ -1,0 +1,29 @@
+# Local server, archives, build outputs and caches
+/.local/
+
+# Python environments and generated files (including submission folders)
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Runtime logs and precomputed data
+agent.log*
+precompute/
+
+# Editor and platform files
+.direnv/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Nix build links at the repository root
+/result
+/result-*
