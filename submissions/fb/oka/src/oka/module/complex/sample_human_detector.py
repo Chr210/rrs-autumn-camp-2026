@@ -50,14 +50,27 @@ class SampleHumanDetector(HumanDetector):
       if not self._is_valid_human(self._result):
         self._result = None
 
-    if self._result is None:
-      self._result = self._select_target()
-
+    self._result = self._select_target()
     return self
 
+  def _calculate_target_score(self, entity: Entity) -> float:
+    distance = self._world_info.get_distance(
+      self._agent_info.get_entity_id(),
+      entity.get_entity_id(),
+    )
+    hp = entity.get_hp()
+    damage = entity.get_damage()
+    
+    time_to_death = hp / damage if damage is not None and damage > 0 else float('inf')
+    
+    # 距離が近く、死期が近いほどスコアを小さく（優先度を高く）する
+    alpha = 1.0
+    beta = 50.0 
+    return (alpha * distance) + (beta * time_to_death)
+  
   def _select_target(self) -> Optional[EntityID]:
-    if self._result is not None and self._is_valid_human(self._result):
-      return self._result
+    #if self._result is not None and self._is_valid_human(self._result):
+    #  return self._result
 
     cluster_index: int = self._clustering.get_cluster_index(
       self._agent_info.get_entity_id()
@@ -66,47 +79,39 @@ class SampleHumanDetector(HumanDetector):
       cluster_index
     )
 
+    # --- クラスタ内の探索 ---
     cluster_valid_human_entities: list[Entity] = [
       entity
       for entity in cluster_entities
       if self._is_valid_human(entity.get_entity_id()) and isinstance(entity, Civilian)
     ]
     if len(cluster_valid_human_entities) != 0:
-      nearest_human_entity = cluster_valid_human_entities[0]
-      nearest_distance = self._world_info.get_distance(
-        self._agent_info.get_entity_id(),
-        nearest_human_entity.get_entity_id(),
-      )
+      best_target = cluster_valid_human_entities[0]
+      best_score = self._calculate_target_score(best_target)
+      
       for entity in cluster_valid_human_entities:
-        distance = self._world_info.get_distance(
-          self._agent_info.get_entity_id(),
-          entity.get_entity_id(),
-        )
-        if distance < nearest_distance:
-          nearest_distance = distance
-          nearest_human_entity = entity
-      return nearest_human_entity.get_entity_id()
+        score = self._calculate_target_score(entity)
+        if score < best_score:
+          best_score = score
+          best_target = entity
+      return best_target.get_entity_id()
 
+    # --- ワールド全体の探索 ---
     world_valid_human_entities: list[Entity] = [
       entity
       for entity in self._world_info.get_entities_of_types([Civilian])
       if self._is_valid_human(entity.get_entity_id())
     ]
     if len(world_valid_human_entities) != 0:
-      nearest_human_entity = world_valid_human_entities[0]
-      nearest_distance = self._world_info.get_distance(
-        self._agent_info.get_entity_id(),
-        nearest_human_entity.get_entity_id(),
-      )
+      best_target = world_valid_human_entities[0]
+      best_score = self._calculate_target_score(best_target)
+      
       for entity in world_valid_human_entities:
-        distance = self._world_info.get_distance(
-          self._agent_info.get_entity_id(),
-          entity.get_entity_id(),
-        )
-        if distance < nearest_distance:
-          nearest_distance = distance
-          nearest_human_entity = entity
-      return nearest_human_entity.get_entity_id()
+        score = self._calculate_target_score(entity)
+        if score < best_score:
+          best_score = score
+          best_target = entity
+      return best_target.get_entity_id()
 
     return None
 
