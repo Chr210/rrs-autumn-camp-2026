@@ -28,7 +28,12 @@ class SampleSearch(Search):
     )
 
     self._unreached_building_ids: set[EntityID] = set()
+    self._unreachable_building_ids: set[EntityID] = set()  # 到達不能な建物のブラックリスト
     self._result: Optional[EntityID] = None
+
+    # スタック判定用の変数
+    self._last_position_id: Optional[EntityID] = None
+    self._stuck_count: int = 0
 
     self._clustering: Clustering = cast(
       Clustering,
@@ -59,16 +64,29 @@ class SampleSearch(Search):
     if self.get_count_update_info() > 1:
       return self
 
-    self._logger.debug(
-      f"unreached_building_ids: {[str(id) for id in self._unreached_building_ids]}"
-    )
-
     searched_building_id = self._agent_info.get_position_entity_id()
     if searched_building_id is not None:
       self._unreached_building_ids.discard(searched_building_id)
 
+    # スタック判定：目的地があるのに現在地が3ステップ連続で変わっていなければ諦める
+    if self._result is not None and searched_building_id == self._last_position_id:
+      self._stuck_count += 1
+      if self._stuck_count >= 3:
+        self._unreached_building_ids.discard(self._result)
+        self._unreachable_building_ids.add(self._result)  # ブラックリストに登録
+        self._stuck_count = 0
+    else:
+      self._last_position_id = searched_building_id
+      self._stuck_count = 0
+
+    # 未探索リストが空になったら再取得（ブラックリストの建物は除外する）
     if len(self._unreached_building_ids) == 0:
-      self._unreached_building_ids = self._get_search_targets()
+      targets = self._get_search_targets()
+      self._unreached_building_ids = targets - self._unreachable_building_ids
+      # もし全ての建物がブラックリストに入ってしまったらリセットする
+      if len(self._unreached_building_ids) == 0:
+        self._unreachable_building_ids.clear()
+        self._unreached_building_ids = targets
 
     return self
 
