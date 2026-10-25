@@ -1,6 +1,6 @@
 from typing import Optional, cast
 
-from rcrscore.entities import AmbulanceTeam, Building, Entity, EntityID, Human, Refuge
+from rcrscore.entities import Building, Entity, EntityID, Refuge
 
 from adf_core_python.core.agent.communication.message_manager import MessageManager
 from adf_core_python.core.agent.develop.develop_data import DevelopData
@@ -28,11 +28,14 @@ class SampleSearch(Search):
     )
 
     self._unreached_building_ids: set[EntityID] = set()
-    self._unreachable_building_ids: set[EntityID] = set()
+    self._unreachable_building_ids: set[EntityID] = set()  # 到達不能な建物のブラックリスト
     self._result: Optional[EntityID] = None
 
+    # スタック判定用の変数
     self._last_position_id: Optional[EntityID] = None
     self._stuck_count: int = 0
+
+    # クラスタ巡回用のオフセット（自分のクラスタが終わったら隣へ行くため）
     self._cluster_offset: int = 0
 
     self._clustering: Clustering = cast(
@@ -68,15 +71,7 @@ class SampleSearch(Search):
     if current_pos_id is not None:
       self._unreached_building_ids.discard(current_pos_id)
 
-    # 視界に入って「壊れていない（brokenness == 0）」と判明した建物を即座に除外する
-    for b_id in list(self._unreached_building_ids):
-      entity = self._world_info.get_entity(b_id)
-      if isinstance(entity, Building):
-        brokenness = entity.get_brokenness()
-        if brokenness is not None and brokenness == 0:
-          self._unreached_building_ids.discard(b_id)
-
-    # スタック判定：目的地に着いていないのに3ステップ同じ場所ならブラックリストへ
+    # 改善1: 目的地にまだ着いていないのに、現在地が3ステップ変わっていなければスタックと判定
     if (
       self._result is not None
       and current_pos_id != self._result
@@ -85,25 +80,27 @@ class SampleSearch(Search):
       self._stuck_count += 1
       if self._stuck_count >= 3:
         self._unreached_building_ids.discard(self._result)
-        self._unreachable_building_ids.add(self._result)
+        self._unreachable_building_ids.add(self._result)  # ブラックリストに登録
         self._stuck_count = 0
     else:
       self._last_position_id = current_pos_id
       self._stuck_count = 0
 
-    # 未探索リストが空になったら補充（空なら隣のクラスタへ）
+    # 改善3: 未探索リストが空になったら、次のクラスタからターゲットを補充する
     if len(self._unreached_building_ids) == 0:
-      for _ in range(5):  # 最大5クラスタ先まで探す
+      targets = self._get_search_targets()
+      self._unreached_building_ids = targets - self._unreachable_building_ids
+
+      # もし現在のクラスタに有効な建物がなければ、隣のクラスタへ移行する
+      if len(self._unreached_building_ids) == 0:
+        self._cluster_offset += 1
         targets = self._get_search_targets()
         self._unreached_building_ids = targets - self._unreachable_building_ids
-        if len(self._unreached_building_ids) > 0:
-          break
-        self._cluster_offset += 1
 
-      # それでも空ならブラックリストをリセット
-      if len(self._unreached_building_ids) == 0:
-        self._unreachable_building_ids.clear()
-        self._unreached_building_ids = self._get_search_targets()
+        # それでも空ならブラックリストをリセットして再取得
+        if len(self._unreached_building_ids) == 0:
+          self._unreachable_building_ids.clear()
+          self._unreached_building_ids = targets
 
     return self
 
@@ -113,52 +110,27 @@ class SampleSearch(Search):
       self._result = None
       return self
 
-    # 知っている全エンティティから「人が埋まっている建物」を特定する
-    ambulance_buildings: set[EntityID] = set()
-    human_buildings: set[EntityID] = set()
-
-    for entity in self._world_info.get_entities():
-      if isinstance(entity, Human):
-        hp = entity.get_hp()
-        buriedness = entity.get_buriedness()
-        pos_id = entity.get_position()
-        # 生存していて瓦礫に埋まっている場合
-        if (
-          hp is not None
-          and hp > 0
-          and buriedness is not None
-          and buriedness > 0
-          and pos_id is not None
-        ):
-          if isinstance(entity, AmbulanceTeam):
-            ambulance_buildings.add(pos_id)
-          else:
-            human_buildings.add(pos_id)
-
     nearest_building_id: Optional[EntityID] = None
     best_score = float("inf")
 
     for building_id in list(self._unreached_building_ids):
+      entity = self._world_info.get_entity(building_id)
+      score_weight = 1.0
+
+      # 改善2 & 4: 建物の倒壊度（brokenness）を確認する
+      if isinstance(entity, Building):
+        brokenness = entity.get_brokenness()
+        if brokenness is not None:
+          if brokenness == 0:
+            # 壊れていない（無傷の）建物は市民が埋まっていないので除外してスキップ
+            self._unreached_building_ids.discard(building_id)
+            continue
+          else:
+            # 壊れている建物は優先度を上げる（評価距離を0.7倍にして選ばれやすくする）
+            score_weight = 0.7
+
       distance = self._path_planning.get_distance(position, building_id)
-      if distance == float("inf") or distance < 0:
-        continue
-
-      score = float(distance)
-
-      # 1. 救急隊が埋まっている建物は超最優先（距離を1/100として扱う）
-      if building_id in ambulance_buildings:
-        score *= 0.01
-      # 2. 市民や他の味方が埋まっている建物も最優先（距離を1/20として扱う）
-      elif building_id in human_buildings:
-        score *= 0.05
-      else:
-        # 3. 人が見えているか不明な場合は、建物の倒壊度が大きいほど優先する
-        entity = self._world_info.get_entity(building_id)
-        if isinstance(entity, Building):
-          brokenness = entity.get_brokenness()
-          if brokenness is not None and brokenness > 0:
-            # 倒壊度が大きいほど係数を小さくする（0.5〜0.8倍）
-            score *= max(0.5, 0.9 - (brokenness * 0.005))
+      score = distance * score_weight
 
       if score < best_score:
         nearest_building_id = building_id
@@ -176,6 +148,7 @@ class SampleSearch(Search):
     )
     cluster_num: int = self._clustering.get_cluster_number()
 
+    # 自分のクラスタが終わったら、順番に隣のクラスタの番号を計算する
     if cluster_num > 0:
       target_index = (base_index + self._cluster_offset) % cluster_num
     else:
@@ -188,6 +161,7 @@ class SampleSearch(Search):
     building_entity_ids: list[EntityID] = []
     for entity in cluster_entities:
       if isinstance(entity, Building) and not isinstance(entity, Refuge):
+        # すでに「壊れていない（0）」と分かっている建物は最初からリストに入れない
         brokenness = entity.get_brokenness()
         if brokenness is not None and brokenness == 0:
           continue
