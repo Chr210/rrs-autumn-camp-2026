@@ -54,6 +54,7 @@ class SampleHumanDetector(HumanDetector):
     self._result = self._select_target()
     return self
 
+  # 追加
   def _calculate_target_score(self, entity: Entity) -> float:
     distance = self._world_info.get_distance(
       self._agent_info.get_entity_id(),
@@ -62,22 +63,34 @@ class SampleHumanDetector(HumanDetector):
     hp = entity.get_hp()
     damage = entity.get_damage()
     
-    # --- 変更点2: ダメージ0でもスコア計算できるように修正 ---
+    # 追加: 埋没度の取得
+    buriedness = entity.get_buriedness()
+    if buriedness is None:
+        buriedness = 0
+    
     if hp is None:
         time_to_death = float('inf')
     elif damage is None or damage == 0:
-        time_to_death = 1000.0  # ダメージ0でも埋没しているなら助けるため、十分大きな猶予時間を設定
+        time_to_death = 1000.0
     else:
         time_to_death = hp / damage
-    
+        
+    # 追加1: 足切り判定（移動にかかる推定ターン＋埋没度 が猶予時間を超える場合は諦める）
+    # ※ distance をターン数に換算する係数（一旦仮に 30000.0）調整したい
+    estimated_turns = (distance / 30000.0) + buriedness
+    if time_to_death < estimated_turns:
+        return float('inf') # 助け切る前に死んでしまうため対象から除外
+
     # 距離が近く、死期が近いほどスコアを小さく（優先度を高く）する
     alpha = 1.0
     beta = 50.0 
-    base_score = (alpha * distance) + (beta * time_to_death)
+    gamma = 20.0  # 追加: 埋没度（救出の手間）に対するペナルティの重み
 
-    # --- 変更点3: エージェントならスコアを良くして最優先で向かわせる ---
+    #gammaを計算式に追加する
+    base_score = (alpha * distance) + (beta * time_to_death) + (gamma * buriedness)
+
     if not isinstance(entity, Civilian):
-        base_score *= 0.1  # Civilian以外（消防、警察、救急）ならスコアを10分の1にする（優先度爆上がり）
+        base_score *= 0.1
         
     return base_score
   
